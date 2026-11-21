@@ -5,7 +5,7 @@ Données externes : https://www.api-football.com/ (clé gratuite personnelle)
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -69,7 +69,10 @@ def date_label(f: dict) -> str:
 
 def discover_match(key: str, hid: int, aid: int, target_date: date):
     # Match must exist in the API. Never synthesize a fixture from team names.
-    scheduled = fetch(key, "fixtures", team=hid, next=35)
+    # The free API plan rejects `next`; use a bounded date interval instead.
+    start = target_date - timedelta(days=7)
+    end = target_date + timedelta(days=7)
+    scheduled = fetch(key, "fixtures", team=hid, **{"from": start.isoformat(), "to": end.isoformat()})
     possible = []
     for f in scheduled:
         ids = f.get("teams") or {}
@@ -135,7 +138,13 @@ def analyze_automatic(key: str, home_name: str, away_name: str,
     if hid == aid:
         raise ApiError("Les deux recherches ont trouvé le même club. Précise les noms.")
 
-    fixture = discover_match(key, hid, aid, date_match)
+    try:
+        fixture = discover_match(key, hid, aid, date_match)
+    except ApiError as exc:
+        # A missing fixture must not silently turn into a confirmed match.
+        if "Free plans" in str(exc) or "not have access" in str(exc):
+            raise ApiError("L'API ne donne pas accès à ces matchs avec l'offre gratuite. Passe en mode manuel ou utilise une saison accessible.") from exc
+        raise
     # If reversed, use actual venue. No fabricated home/away assignments.
     if fixture:
         ids = fixture.get("teams") or {}
@@ -145,8 +154,13 @@ def analyze_automatic(key: str, home_name: str, away_name: str,
     cutoff = None
     if fixture:
         cutoff = datetime.fromtimestamp(fixture["fixture"]["timestamp"], timezone.utc)
-    raw_h = fetch(key, "fixtures", team=hid, last=n_history + 5)
-    raw_a = fetch(key, "fixtures", team=aid, last=n_history + 5)
+    # The free API plan also rejects `last`. Fetch a historical date window.
+    # Never use results after the requested fixture date.
+    history_end = min(date_match - timedelta(days=1), date.today())
+    history_start = history_end - timedelta(days=240)
+    window = {"from": history_start.isoformat(), "to": history_end.isoformat()}
+    raw_h = fetch(key, "fixtures", team=hid, **window)
+    raw_a = fetch(key, "fixtures", team=aid, **window)
     hrows = extract_finished_matches(raw_h, hid, before=cutoff, limit=n_history)
     arows = extract_finished_matches(raw_a, aid, before=cutoff, limit=n_history)
 
